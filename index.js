@@ -1,10 +1,27 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const db = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-key-change-this';
+
+// Middleware to verify JWT token
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) return res.status(401).json({ error: 'Authentication required' });
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: 'Invalid or expired token' });
+    req.user = user;
+    next();
+  });
+}
 
 app.use(cors());
 app.use(express.json());
@@ -144,10 +161,43 @@ app.get('/', (req, res) => {
         ::-webkit-scrollbar-track { background: var(--bg-dark); }
         ::-webkit-scrollbar-thumb { background: var(--glass-border); border-radius: 10px; }
         ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+        /* Auth Overlay */
+        #auth-overlay {
+          position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+          background: var(--bg-dark); z-index: 2000;
+          display: flex; align-items: center; justify-content: center;
+          backdrop-filter: blur(20px);
+        }
+        .auth-card {
+          background: #1c1e29; padding: 3rem; border-radius: 24px;
+          border: 1px solid var(--glass-border); width: 100%; max-width: 400px;
+          box-shadow: 0 25px 50px rgba(0,0,0,0.5);
+        }
       </style>
     </head>
-    <body>
-      <div class="app-container">
+    <body class="is-loading">
+      <!-- Login Overlay -->
+      <div id="auth-overlay">
+        <div class="auth-card">
+          <div class="logo" style="text-align:center; font-size: 2rem; margin-bottom: 2rem;">LicenseCore</div>
+          <h2 style="margin-bottom: 1.5rem; font-weight: 600; text-align: center;">Administrator Login</h2>
+          <form onsubmit="handleLogin(event)">
+            <div class="form-group">
+              <label>Username</label>
+              <input type="text" id="login-username" placeholder="admin" required>
+            </div>
+            <div class="form-group">
+              <label>Password</label>
+              <input type="password" id="login-password" placeholder="••••••••" required>
+            </div>
+            <button type="submit" class="btn-primary" style="width: 100%; margin-top: 1rem;">Sign In</button>
+            <p id="login-error" style="color: var(--danger); font-size: 0.85rem; margin-top: 1rem; text-align: center; display: none;"></p>
+          </form>
+        </div>
+      </div>
+
+      <div class="app-container" id="main-app" style="display: none;">
         <aside>
           <div class="logo">LicenseCore</div>
           
@@ -162,6 +212,13 @@ app.get('/', (req, res) => {
             <h4>Filter By System</h4>
             <div id="sidebar-systems">
               <!-- Dynamically populated -->
+            </div>
+          </nav>
+
+          <nav class="nav-section" style="margin-top: auto;">
+            <div class="nav-item" onclick="logout()" style="color: var(--danger);">
+              <span style="margin-right: 0.5rem;">Logout</span>
+              <small id="user-display" style="color: var(--text-muted);"></small>
             </div>
           </nav>
         </aside>
@@ -312,9 +369,72 @@ app.get('/', (req, res) => {
         let currentFilter = 'All';
         let allLicenses = [];
 
+        async function apiFetch(url, options = {}) {
+          const token = localStorage.getItem('auth_token');
+          const headers = {
+            'Content-Type': 'application/json',
+            ...options.headers
+          };
+          if (token) headers['Authorization'] = \`Bearer \${token}\`;
+
+          const res = await fetch(url, { ...options, headers });
+          if (res.status === 401 || res.status === 403) {
+            logout();
+            throw new Error('Unauthorized');
+          }
+          return res;
+        }
+
+        async function handleLogin(e) {
+          e.preventDefault();
+          const username = document.getElementById('login-username').value;
+          const password = document.getElementById('login-password').value;
+          const errorEl = document.getElementById('login-error');
+
+          try {
+            const res = await fetch('/api/auth/login', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ username, password })
+            });
+
+            const data = await res.json();
+            if (res.ok) {
+              localStorage.setItem('auth_token', data.token);
+              localStorage.setItem('auth_user', data.username);
+              checkAuth();
+            } else {
+              errorEl.innerText = data.error || 'Login failed';
+              errorEl.style.display = 'block';
+            }
+          } catch (err) {
+            errorEl.innerText = 'Connection error';
+            errorEl.style.display = 'block';
+          }
+        }
+
+        function logout() {
+          localStorage.removeItem('auth_token');
+          localStorage.removeItem('auth_user');
+          location.reload();
+        }
+
+        function checkAuth() {
+          const token = localStorage.getItem('auth_token');
+          if (token) {
+            document.getElementById('auth-overlay').style.display = 'none';
+            document.getElementById('main-app').style.display = 'grid';
+            document.getElementById('user-display').innerText = '@' + localStorage.getItem('auth_user');
+            loadData();
+          } else {
+            document.getElementById('auth-overlay').style.display = 'flex';
+            document.getElementById('main-app').style.display = 'none';
+          }
+        }
+
         async function loadData() {
           try {
-            const res = await fetch('/api/licenses');
+            const res = await apiFetch('/api/licenses');
             allLicenses = await res.json();
             await loadSystems();
             renderDashboard();
@@ -325,7 +445,7 @@ app.get('/', (req, res) => {
 
         async function loadSystems() {
           try {
-            const res = await fetch('/api/systems');
+            const res = await apiFetch('/api/systems');
             const systems = await res.json();
             
             // Update Sidebar
@@ -441,7 +561,7 @@ app.get('/', (req, res) => {
           if (!confirm('Are you sure you want to delete this license? This action cannot be undone.')) return;
           
           try {
-            await fetch('/api/licenses/' + id, { method: 'DELETE' });
+            await apiFetch('/api/licenses/' + id, { method: 'DELETE' });
             loadData();
           } catch (e) {
             console.error('Error deleting license:', e);
@@ -469,9 +589,8 @@ app.get('/', (req, res) => {
             description: document.getElementById('description_create').value
           };
           
-          await fetch('/api/licenses', {
+          await apiFetch('/api/licenses', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
           });
           
@@ -482,9 +601,8 @@ app.get('/', (req, res) => {
 
         async function toggleKey(id, currentStatus) {
           const newStatus = currentStatus ? 0 : 1;
-          await fetch('/api/licenses/' + id + '/status', {
+          await apiFetch('/api/licenses/' + id + '/status', {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ is_active: newStatus })
           });
           loadData();
@@ -502,9 +620,8 @@ app.get('/', (req, res) => {
           const next_payment_date = document.getElementById('renew-date').value;
           const amount_paid = document.getElementById('renew-amount').value;
 
-          await fetch('/api/licenses/' + currentRenewId + '/renew', {
+          await apiFetch('/api/licenses/' + currentRenewId + '/renew', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ additional_days: 0, next_payment_date, amount_paid })
           });
 
@@ -513,7 +630,7 @@ app.get('/', (req, res) => {
         }
 
         async function viewHistory(id) {
-          const res = await fetch('/api/licenses/' + id + '/payments');
+          const res = await apiFetch('/api/licenses/' + id + '/payments');
           const data = await res.json();
           const tbody = document.getElementById('history-tbody');
           tbody.innerHTML = '';
@@ -534,10 +651,10 @@ app.get('/', (req, res) => {
         function openModal(id) { document.getElementById(id).style.display = 'flex'; }
         function closeModal(id) { document.getElementById(id).style.display = 'none'; }
 
-        // Initialize today's date for inputs
+        // Initialize session
         window.onload = () => {
           document.getElementById('start_date_create').valueAsDate = new Date();
-          loadData();
+          checkAuth();
         };
       </script>
     </body>
@@ -556,8 +673,25 @@ function generateLicenseKey() {
   return result; // e.g., ABCD-1234-EFGH-5678
 }
 
+// API: Auth Login
+app.post('/api/auth/login', async (req, res) => {
+  const { username, password } = req.body;
+  try {
+    const user = await db.get("SELECT * FROM users WHERE username = ?", [username]);
+    if (!user) return res.status(401).json({ error: 'Invalid username or password' });
+
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+    if (!validPassword) return res.status(401).json({ error: 'Invalid username or password' });
+
+    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
+    res.json({ token, username: user.username });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // API: Get all keys
-app.get('/api/licenses', async (req, res) => {
+app.get('/api/licenses', authenticateToken, async (req, res) => {
   try {
     const rows = await db.all("SELECT * FROM licenses ORDER BY id DESC", []);
 
@@ -579,7 +713,7 @@ app.get('/api/licenses', async (req, res) => {
 });
 
 // API: GSGet unique systems
-app.get('/api/systems', async (req, res) => {
+app.get('/api/systems', authenticateToken, async (req, res) => {
   try {
     const rows = await db.all("SELECT DISTINCT system_name FROM licenses WHERE system_name IS NOT NULL", []);
     res.json(rows.map(r => r.system_name));
@@ -589,7 +723,7 @@ app.get('/api/systems', async (req, res) => {
 });
 
 // API: Delete license
-app.delete('/api/licenses/:id', async (req, res) => {
+app.delete('/api/licenses/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
     await db.run("DELETE FROM licenses WHERE id = ?", [id]);
@@ -601,7 +735,7 @@ app.delete('/api/licenses/:id', async (req, res) => {
 });
 
 // API: Create new key
-app.post('/api/licenses', async (req, res) => {
+app.post('/api/licenses', authenticateToken, async (req, res) => {
   const { duration_days, next_payment_date, client_name, description, payment_fee, system_name, start_date, payment_terms } = req.body;
   if (!next_payment_date) {
     return res.status(400).json({ error: 'Missing next payment date' });
@@ -622,7 +756,7 @@ app.post('/api/licenses', async (req, res) => {
 });
 
 // API: Toggle status
-app.put('/api/licenses/:id/status', async (req, res) => {
+app.put('/api/licenses/:id/status', authenticateToken, async (req, res) => {
   const { is_active } = req.body;
   try {
     const result = await db.run("UPDATE licenses SET is_active = ? WHERE id = ?", [is_active, req.params.id]);
@@ -634,7 +768,7 @@ app.put('/api/licenses/:id/status', async (req, res) => {
 
 
 // API: Renew license
-app.post('/api/licenses/:id/renew', async (req, res) => {
+app.post('/api/licenses/:id/renew', authenticateToken, async (req, res) => {
   const { additional_days, next_payment_date, amount_paid } = req.body;
   const licenseId = req.params.id;
 
@@ -663,7 +797,7 @@ app.post('/api/licenses/:id/renew', async (req, res) => {
 });
 
 // API: Get Payment History
-app.get('/api/licenses/:id/payments', async (req, res) => {
+app.get('/api/licenses/:id/payments', authenticateToken, async (req, res) => {
   try {
     const rows = await db.all(
       "SELECT * FROM payments WHERE license_id = ? ORDER BY payment_date DESC",
