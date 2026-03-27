@@ -1,21 +1,10 @@
 require('dotenv').config();
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
 const cors = require('cors');
+const db = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
-const dbFilePath = process.env.DB_PATH || path.resolve(__dirname, 'licenses.db');
-
-// Ensure database directory exists if a path is provided
-const dbDir = path.dirname(dbFilePath);
-const fs = require('fs');
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
-}
-
-const db = new sqlite3.Database(dbFilePath);
 
 app.use(cors());
 app.use(express.json());
@@ -568,9 +557,9 @@ function generateLicenseKey() {
 }
 
 // API: Get all keys
-app.get('/api/licenses', (req, res) => {
-  db.all("SELECT * FROM licenses ORDER BY id DESC", [], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
+app.get('/api/licenses', async (req, res) => {
+  try {
+    const rows = await db.all("SELECT * FROM licenses ORDER BY id DESC", []);
 
     // Calculate remaining days dynamically for the UI
     const today = new Date();
@@ -584,61 +573,68 @@ app.get('/api/licenses', (req, res) => {
     });
 
     res.json(enhancedRows);
-  });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // API: GSGet unique systems
-app.get('/api/systems', (req, res) => {
-  db.all("SELECT DISTINCT system_name FROM licenses WHERE system_name IS NOT NULL", [], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
+app.get('/api/systems', async (req, res) => {
+  try {
+    const rows = await db.all("SELECT DISTINCT system_name FROM licenses WHERE system_name IS NOT NULL", []);
     res.json(rows.map(r => r.system_name));
-  });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // API: Delete license
-app.delete('/api/licenses/:id', (req, res) => {
+app.delete('/api/licenses/:id', async (req, res) => {
   const { id } = req.params;
-  db.run("DELETE FROM licenses WHERE id = ?", [id], function(err) {
-    if (err) return res.status(500).json({ error: err.message });
-    // Also cleanup payments history
-    db.run("DELETE FROM payments WHERE license_id = ?", [id], (err2) => {
-       res.json({ message: 'License deleted', success: true });
-    });
-  });
+  try {
+    await db.run("DELETE FROM licenses WHERE id = ?", [id]);
+    await db.run("DELETE FROM payments WHERE license_id = ?", [id]);
+    res.json({ message: 'License deleted', success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // API: Create new key
-app.post('/api/licenses', (req, res) => {
+app.post('/api/licenses', async (req, res) => {
   const { duration_days, next_payment_date, client_name, description, payment_fee, system_name, start_date, payment_terms } = req.body;
   if (!next_payment_date) {
     return res.status(400).json({ error: 'Missing next payment date' });
   }
 
   const duration = duration_days || 0;
-
   const key = generateLicenseKey();
-  db.run(
-    "INSERT INTO licenses (key, duration_days, next_payment_date, client_name, description, payment_fee, system_name, start_date, payment_terms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    [key, parseInt(duration), next_payment_date, client_name || null, description || null, payment_fee || null, system_name || null, start_date || null, payment_terms || null],
-    function (err) {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ id: this.lastID, key, duration_days, next_payment_date, is_active: 1, client_name, payment_fee, system_name, start_date, payment_terms });
-    }
-  );
+
+  try {
+    const result = await db.run(
+      "INSERT INTO licenses (key, duration_days, next_payment_date, client_name, description, payment_fee, system_name, start_date, payment_terms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [key, parseInt(duration), next_payment_date, client_name || null, description || null, payment_fee || null, system_name || null, start_date || null, payment_terms || null]
+    );
+    res.json({ id: result.lastID, key, duration_days, next_payment_date, is_active: 1, client_name, payment_fee, system_name, start_date, payment_terms });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // API: Toggle status
-app.put('/api/licenses/:id/status', (req, res) => {
+app.put('/api/licenses/:id/status', async (req, res) => {
   const { is_active } = req.body;
-  db.run("UPDATE licenses SET is_active = ? WHERE id = ?", [is_active, req.params.id], function (err) {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ success: true, changes: this.changes });
-  });
+  try {
+    const result = await db.run("UPDATE licenses SET is_active = ? WHERE id = ?", [is_active, req.params.id]);
+    res.json({ success: true, changes: result.changes });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 
 // API: Renew license
-app.post('/api/licenses/:id/renew', (req, res) => {
+app.post('/api/licenses/:id/renew', async (req, res) => {
   const { additional_days, next_payment_date, amount_paid } = req.body;
   const licenseId = req.params.id;
 
@@ -646,50 +642,46 @@ app.post('/api/licenses/:id/renew', (req, res) => {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
-  db.serialize(() => {
-    db.run("BEGIN TRANSACTION");
+  try {
+    await db.serialize(async () => {
+      // 1. Update the license table
+      await db.run(
+        "UPDATE licenses SET duration_days = duration_days + ?, next_payment_date = ? WHERE id = ?",
+        [parseInt(additional_days), next_payment_date, licenseId]
+      );
 
-    // 1. Update the license table
-    db.run(
-      "UPDATE licenses SET duration_days = duration_days + ?, next_payment_date = ? WHERE id = ?",
-      [parseInt(additional_days), next_payment_date, licenseId]
-    );
-
-    // 2. Insert into payments table
-    db.run(
-      "INSERT INTO payments (license_id, amount_paid, extended_date) VALUES (?, ?, ?)",
-      [licenseId, amount_paid || null, next_payment_date],
-      function (err) {
-        if (err) {
-          db.run("ROLLBACK");
-          return res.status(500).json({ error: err.message });
-        }
-        db.run("COMMIT");
-        res.json({ success: true, message: 'License renewed successfully' });
-      }
-    );
-  });
+      // 2. Insert into payments table
+      await db.run(
+        "INSERT INTO payments (license_id, amount_paid, extended_date) VALUES (?, ?, ?)",
+        [licenseId, amount_paid || null, next_payment_date]
+      );
+    });
+    res.json({ success: true, message: 'License renewed successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // API: Get Payment History
-app.get('/api/licenses/:id/payments', (req, res) => {
-  db.all(
-    "SELECT * FROM payments WHERE license_id = ? ORDER BY payment_date DESC",
-    [req.params.id],
-    (err, rows) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json(rows);
-    }
-  );
+app.get('/api/licenses/:id/payments', async (req, res) => {
+  try {
+    const rows = await db.all(
+      "SELECT * FROM payments WHERE license_id = ? ORDER BY payment_date DESC",
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // API: Validate key (Called by LMS)
-app.get('/api/validate', (req, res) => {
+app.get('/api/validate', async (req, res) => {
   const { key } = req.query;
   if (!key) return res.status(400).json({ valid: false, reason: 'missing_key' });
 
-  db.get("SELECT * FROM licenses WHERE key = ?", [key], (err, row) => {
-    if (err) return res.status(500).json({ valid: false, error: err.message });
+  try {
+    const row = await db.get("SELECT * FROM licenses WHERE key = ?", [key]);
     if (!row) return res.status(404).json({ valid: false, reason: 'invalid_key' });
     if (!row.is_active) return res.status(403).json({ valid: false, reason: 'revoked' });
 
@@ -713,7 +705,9 @@ app.get('/api/validate', (req, res) => {
       start_date: row.start_date,
       payment_terms: row.payment_terms
     });
-  });
+  } catch (err) {
+    res.status(500).json({ valid: false, error: err.message });
+  }
 });
 
 app.listen(PORT, () => {
