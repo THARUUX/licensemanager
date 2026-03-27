@@ -1,8 +1,16 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 
-const dbPath = path.resolve(__dirname, 'licenses.db');
-const db = new sqlite3.Database(dbPath);
+const dbFilePath = process.env.DB_PATH || path.resolve(__dirname, 'licenses.db');
+
+// Ensure database directory exists if a path is provided
+const dbDir = path.dirname(dbFilePath);
+const fs = require('fs');
+if (!fs.existsSync(dbDir)) {
+  fs.mkdirSync(dbDir, { recursive: true });
+}
+
+const db = new sqlite3.Database(dbFilePath);
 
 db.serialize(() => {
   db.run(`
