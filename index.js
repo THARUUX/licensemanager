@@ -710,6 +710,10 @@ app.get('/api/validate', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`License Manager running on http://localhost:${PORT}`);
-});
+if (process.env.NODE_ENV !== 'test' && !process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`License Manager running on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
